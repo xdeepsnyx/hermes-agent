@@ -28,6 +28,7 @@ Usage:
     )
 """
 
+import asyncio
 import base64
 import json
 import logging
@@ -46,6 +47,133 @@ import sys
 logger = logging.getLogger(__name__)
 
 _debug = DebugSession("vision_tools", env_var="VISION_TOOLS_DEBUG")
+
+
+# ---------------------------------------------------------------------------
+# Custom patch (Deep/Nyx fork): MiniMax vision via mmx CLI
+# ---------------------------------------------------------------------------
+# MiniMax's /anthropic endpoint silently hallucinates on image input (confirmed
+# by MiniMax GitHub Issue #92 — vision is not supported on that endpoint).
+# When the user's active main provider is `minimax`, we shell out to the
+# official `mmx` CLI which calls MiniMax's native VLM directly. See SKILL.md
+# at ~/.hermes/skills/mlops/inference/minimax-vision/ for the user-level
+# fallback (still useful for "closer look" follow-ups in conversation).
+#
+# This intercept runs BEFORE base64 conversion in vision_analyze_tool, so we
+# skip the entire LLM-client path for MiniMax. Failure does NOT fall through
+# to async_call_llm — that would just hallucinate again.
+
+MMX_BIN = "/usr/local/bin/mmx"
+MMX_VISION_LABEL = "mmx vision describe (MiniMax VLM)"
+MMX_DEFAULT_TIMEOUT_S = 120.0
+
+
+def _load_minimax_api_key_from_env_file() -> Optional[str]:
+    """Read MINIMAX_API_KEY from ~/.hermes/.env. Used when the subprocess
+    doesn't inherit it from the Hermes parent process env."""
+    env_path = Path(os.path.expanduser("~/.hermes/.env"))
+    if not env_path.is_file():
+        return None
+    try:
+        for line in env_path.read_text().splitlines():
+            if line.startswith("MINIMAX_API_KEY="):
+                return line.split("=", 1)[1].strip().strip('"').strip("'")
+    except Exception:
+        return None
+    return None
+
+
+async def _mmx_vision_describe(
+    image_path: Path,
+    prompt: str,
+    *,
+    timeout_s: float = MMX_DEFAULT_TIMEOUT_S,
+) -> str:
+    """Call `mmx vision describe --image <path> --prompt <prompt>` and return
+    the analysis text. Raises RuntimeError on CLI or API failure with a
+    description suitable for the caller's error surface.
+
+    Two error shapes handled:
+      1. CLI-level: {"error": {"code": int, "message": str}} (no base_resp)
+      2. Server-level: {"content": "...", "base_resp": {"status_code": !=0, ...}}
+    """
+    if not Path(MMX_BIN).exists():
+        raise RuntimeError(f"mmx CLI not installed at {MMX_BIN}")
+    args = [
+        MMX_BIN, "vision", "describe",
+        "--image", str(image_path),
+        "--prompt", prompt or "Describe the image.",
+        "--output", "json",
+        "--non-interactive",
+    ]
+    # Don't log the prompt verbatim (could leak user content); log structure only.
+    logger.info(
+        "mmx vision: image=%s prompt_len=%d timeout=%.0fs",
+        image_path.name, len(prompt or ""), timeout_s,
+    )
+
+    env = os.environ.copy()
+    if not env.get("MINIMAX_API_KEY"):
+        # Subprocess didn't inherit env (e.g. some cron contexts). Source it
+        # from .env so mmx's auth-resolution order (config.json → MINIMAX_API_KEY)
+        # has the env-var fallback available even if the persisted config is stale.
+        key = _load_minimax_api_key_from_env_file()
+        if key:
+            env["MINIMAX_API_KEY"] = key
+
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *args,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=env,
+        )
+        try:
+            stdout_b, stderr_b = await asyncio.wait_for(
+                proc.communicate(), timeout=timeout_s
+            )
+        except asyncio.TimeoutError:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+            raise RuntimeError(f"mmx vision timed out after {timeout_s:.0f}s")
+    except FileNotFoundError:
+        raise RuntimeError(f"mmx CLI executable not found at {MMX_BIN}")
+
+    rc = proc.returncode
+    stdout = (stdout_b or b"").decode("utf-8", errors="replace").strip()
+    stderr = (stderr_b or b"").decode("utf-8", errors="replace").strip()
+
+    if not stdout:
+        raise RuntimeError(
+            f"mmx vision returned no stdout (rc={rc}): "
+            f"{stderr[:300] if stderr else '<empty>'}"
+        )
+
+    try:
+        payload = json.loads(stdout)
+    except json.JSONDecodeError as e:
+        raise RuntimeError(
+            f"mmx vision returned non-JSON output (rc={rc}): "
+            f"{stdout[:200]!r} ({e})"
+        )
+
+    if isinstance(payload.get("error"), dict):
+        err = payload["error"]
+        raise RuntimeError(
+            f"mmx vision CLI error code={err.get('code')}: {err.get('message')}"
+        )
+    base = payload.get("base_resp") or {}
+    if base.get("status_code", 0) != 0:
+        raise RuntimeError(
+            f"mmx vision server error status_code={base.get('status_code')}: "
+            f"{base.get('status_msg') or 'unknown'}"
+        )
+    content = (payload.get("content") or "").strip()
+    if not content:
+        raise RuntimeError("mmx vision returned empty content with success status")
+    return content
 
 # Configurable HTTP download timeout for _download_image().
 # Separate from auxiliary.vision.timeout which governs the LLM API call.
@@ -730,7 +858,61 @@ async def vision_analyze_tool(
         detected_mime_type = _detect_image_mime_type(temp_image_path)
         if not detected_mime_type:
             raise ValueError("Only real image files are supported for vision analysis.")
-        
+
+        # --- Custom patch (Deep/Nyx fork): MiniMax → mmx CLI -----------------
+        # MiniMax's /anthropic endpoint hallucinates on image input. If the
+        # active main provider is `minimax`, route through the mmx CLI which
+        # calls MiniMax's native VLM directly. Failure does NOT fall through
+        # to async_call_llm — that path would just hallucinate again — so we
+        # return a clean error response instead.
+        try:
+            from agent.auxiliary_client import _read_main_provider
+            active_provider = _read_main_provider()
+        except Exception:
+            active_provider = ""
+        if active_provider == "minimax":
+            logger.info(
+                "Vision routed via mmx CLI (active provider=minimax; "
+                "skipping base64/LLM path)"
+            )
+            try:
+                analysis = await _mmx_vision_describe(temp_image_path, user_prompt)
+                analysis_length = len(analysis)
+                debug_call_data["success"] = True
+                debug_call_data["analysis_length"] = analysis_length
+                debug_call_data["model_used"] = MMX_VISION_LABEL
+                debug_call_data["image_size_bytes"] = temp_image_path.stat().st_size
+                _debug.log_call("vision_analyze_tool", debug_call_data)
+                _debug.save()
+                return json.dumps(
+                    {"success": True, "analysis": analysis},
+                    indent=2,
+                    ensure_ascii=False,
+                )
+            except Exception as mmx_err:
+                error_msg = f"mmx vision (MiniMax) failed: {mmx_err}"
+                logger.error("%s", error_msg)
+                debug_call_data["error"] = error_msg
+                debug_call_data["model_used"] = MMX_VISION_LABEL
+                _debug.log_call("vision_analyze_tool", debug_call_data)
+                _debug.save()
+                return json.dumps(
+                    {
+                        "success": False,
+                        "error": error_msg,
+                        "analysis": (
+                            "Image analysis is unavailable. The mmx CLI fallback "
+                            "for MiniMax vision failed and MiniMax's /anthropic "
+                            "endpoint cannot accept image input directly. Ask the "
+                            "user to retry or switch to a vision-capable provider. "
+                            f"Details: {mmx_err}"
+                        ),
+                    },
+                    indent=2,
+                    ensure_ascii=False,
+                )
+        # --- End custom patch ------------------------------------------------
+
         # Convert image to base64 — send at full resolution first.
         # If the provider rejects it as too large, we auto-resize and retry.
         logger.info("Converting image to base64...")
