@@ -564,6 +564,41 @@ def calendar_delete(args):
     print(json.dumps({"status": "deleted", "eventId": args.event_id}))
 
 
+def calendar_calendars(args):
+    """List every calendar on the account (calendarList.list).
+
+    The other calendar commands operate on *events* within one calendar;
+    this one answers "what calendars exist" — IDs, names, access roles —
+    which is the lookup you need before targeting a non-primary calendar
+    with `calendar list --calendar <id>`.
+
+    Always uses the Python client: gws's calendarList surface varies
+    across versions and this is a cheap read, so the universal path
+    (same precedent as drive_upload/download) is the safe choice.
+    """
+    service = build_service("calendar", "v3")
+    calendars = []
+    page_token = None
+    while True:
+        resp = service.calendarList().list(
+            maxResults=args.max, pageToken=page_token,
+        ).execute()
+        for c in resp.get("items", []):
+            calendars.append({
+                "id": c["id"],
+                "summary": c.get("summary", "(no title)"),
+                "primary": c.get("primary", False),
+                "accessRole": c.get("accessRole", ""),
+                "timeZone": c.get("timeZone", ""),
+                "backgroundColor": c.get("backgroundColor", ""),
+                "selected": c.get("selected", False),
+            })
+        page_token = resp.get("nextPageToken")
+        if not page_token:
+            break
+    print(json.dumps(calendars, indent=2, ensure_ascii=False))
+
+
 # =========================================================================
 # Drive
 # =========================================================================
@@ -1118,6 +1153,10 @@ def main():
     p.add_argument("event_id")
     p.add_argument("--calendar", default="primary")
     p.set_defaults(func=calendar_delete)
+
+    p = cal_sub.add_parser("calendars", help="List all calendars on the account (IDs, names, access roles)")
+    p.add_argument("--max", type=int, default=250, help="Page size, max 250 (results are auto-paginated)")
+    p.set_defaults(func=calendar_calendars)
 
     # --- Drive ---
     drv = sub.add_parser("drive")
