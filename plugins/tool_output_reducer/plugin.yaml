@@ -1,5 +1,5 @@
 name: tool_output_reducer
-version: 1.0.1
+version: 1.0.2
 description: "Deterministic pre-LLM compactor for tool execution results. Strips ANSI escape sequences and collapses adjacent duplicate lines on outputs >= 240 bytes from any tool except a small pass-through allowlist and error responses. Disable: HERMES_REDUCER_DISABLE=1."
 author: "@xdeepsnyx (concept inspired by openhuman's TokenJuice; clean-room Python reimplementation)"
 hooks:
