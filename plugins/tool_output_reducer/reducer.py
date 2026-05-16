@@ -90,8 +90,56 @@ def _is_error_response(raw: str) -> bool:
     return isinstance(obj, dict) and "error" in obj
 
 
+def _apply_chain(text: str) -> str:
+    """Run the universal rule chain (ANSI strip + adjacent-line dedupe)."""
+    text = ansi.strip_ansi(text)
+    text = dedupe.collapse_adjacent_duplicates(text)
+    return text
+
+
+def _try_reduce_json_output(raw: str) -> Optional[str]:
+    """If raw is a JSON object with a string ``output`` field, reduce that
+    field's content and return the reserialized JSON. Returns ``None`` if
+    the shape doesn't match or no actual reduction happened.
+
+    This handles the dominant tool-result shape in hermes-agent: tools like
+    ``terminal`` return ``json.dumps({"output": "<bash stdout>", ...})``,
+    so the noisy text lives inside a JSON string value rather than at the
+    top level. Without this, the dedupe rule sees one giant line (no real
+    newlines in the JSON wrapper) and never fires.
+    """
+    if not raw.startswith("{"):
+        return None
+    try:
+        obj = json.loads(raw)
+    except (json.JSONDecodeError, ValueError):
+        return None
+    if not isinstance(obj, dict):
+        return None
+    output = obj.get("output")
+    if not isinstance(output, str) or len(output) < PASSTHROUGH_THRESHOLD:
+        return None
+
+    try:
+        reduced_output = _apply_chain(output)
+    except Exception as e:
+        logger.warning("reducer chain error on JSON output field: %s", e)
+        return None
+
+    if len(reduced_output) >= len(output):
+        return None
+
+    obj["output"] = reduced_output
+    return json.dumps(obj, ensure_ascii=False)
+
+
 def reduce_tool_output(tool_name: str, raw: str) -> Optional[str]:
     """Apply universal rule chain (ANSI strip + adjacent-line dedupe) to raw.
+
+    Two reduction paths:
+      1. If raw is a JSON object with a string ``output`` field
+         (terminal/bash and similar), reduce that field in place.
+      2. Otherwise reduce the raw text directly.
 
     Returns the reduced string, or ``None`` if the original should pass
     through unchanged (too short, allowlisted tool, error response, rule
@@ -104,9 +152,15 @@ def reduce_tool_output(tool_name: str, raw: str) -> Optional[str]:
     if _is_error_response(raw):
         return None
 
+    # Path 1: JSON-wrapped tool result with `output` field.
+    json_reduced = _try_reduce_json_output(raw)
+    if json_reduced is not None and len(json_reduced) < len(raw):
+        _log_reduction(tool_name, len(raw), len(json_reduced))
+        return json_reduced
+
+    # Path 2: raw text (no JSON wrapping, or different schema).
     try:
-        reduced = ansi.strip_ansi(raw)
-        reduced = dedupe.collapse_adjacent_duplicates(reduced)
+        reduced = _apply_chain(raw)
     except Exception as e:
         logger.warning("reducer chain error for tool %s: %s", tool_name, e)
         return None
