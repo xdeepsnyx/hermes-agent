@@ -254,6 +254,54 @@ class TestReducerChain:
         assert "saved=" in content
 
 
+class TestReducerJsonWrapping:
+    def test_reduces_output_field_inside_json_wrapper(self):
+        """Dominant case: terminal tool returns json.dumps({'output': '...'})."""
+        reducer = _load_reducer()
+        import json as _json
+        noisy = "dup line\n" * 100
+        raw = _json.dumps({"output": noisy, "exit_code": 0})
+        out = reducer.reduce_tool_output("terminal", raw)
+        assert out is not None
+        # Re-parse to confirm structure preserved
+        parsed = _json.loads(out)
+        assert parsed["exit_code"] == 0
+        assert "dup line" in parsed["output"]
+        assert "(... 99 more identical lines ...)" in parsed["output"]
+        assert len(out) < len(raw)
+
+    def test_strips_ansi_inside_json_wrapper(self):
+        reducer = _load_reducer()
+        import json as _json
+        # ANSI inside the output value, plus enough volume to clear threshold
+        noisy = "\x1b[32mhello\x1b[0m\n" + ("x\n" * 200)
+        raw = _json.dumps({"output": noisy, "exit_code": 0})
+        out = reducer.reduce_tool_output("terminal", raw)
+        assert out is not None
+        parsed = _json.loads(out)
+        assert "\x1b" not in parsed["output"]
+
+    def test_passes_through_json_without_output_field(self):
+        reducer = _load_reducer()
+        import json as _json
+        # JSON object but no `output` field — should not try to reduce.
+        raw = _json.dumps({"content": "x" * 500, "metadata": {"k": "v"}})
+        out = reducer.reduce_tool_output("some_tool", raw)
+        # Falls through to plain-text path; that splits on \n in the JSON
+        # which has none, so no reduction. Returns None.
+        assert out is None
+
+    def test_passes_through_json_with_short_output_field(self):
+        reducer = _load_reducer()
+        import json as _json
+        raw = _json.dumps({"output": "tiny output", "exit_code": 0})
+        # Wrapper > threshold but output field < threshold.
+        # Wait — actually whole raw might be < threshold. Make it > 240.
+        raw = _json.dumps({"output": "short", "filler": "x" * 300})
+        out = reducer.reduce_tool_output("terminal", raw)
+        assert out is None
+
+
 class TestReducerFailOpen:
     def test_rule_exception_returns_none(self, monkeypatch):
         reducer = _load_reducer()
