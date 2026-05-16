@@ -44,15 +44,26 @@ LOG_PATH = _HERMES_HOME / "logs" / "tool_reducer.log"
 
 # Tools whose output is already structured / clean — skip the rule chain.
 # This is an optimization, not a safety guard: the rules are safe to run
-# on these anyway, but skipping avoids spurious "reduced 0 bytes" log lines.
+# on these anyway (ANSI strip + dedupe are no-ops on structured JSON), but
+# skipping avoids spurious "reduced 0 bytes" log lines.
+#
+# Names verified against the actual tool registry (`tools/*.py` +
+# `plugins/memory/*` registry.register() calls) — wrong names just fall
+# through to the universal chain harmlessly, but correct names are clearer.
 _PASSTHROUGH_TOOLS: frozenset[str] = frozenset(
     {
+        # File tools
         "read_file",
         "write_file",
-        "edit_file",
-        "supermemory_add",
+        "patch",
+        "search_files",
+        # Memory / second-brain tools
+        "memory",
+        "supermemory_store",
         "supermemory_search",
-        "todo_write",
+        "supermemory_forget",
+        # Task tracker
+        "todo",
     }
 )
 
