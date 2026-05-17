@@ -68,6 +68,20 @@ remindctl add --title "Call mom" --list Personal --due tomorrow
 remindctl add --title "Meeting prep" --due "2026-02-15 09:00"
 ```
 
+### Edit Reminders
+
+```bash
+remindctl edit 4A83 --title "New title"            # Rename
+remindctl edit 4A83 --due "2026-05-17 22:00"       # Set due date
+remindctl edit 4A83 --alarm "2026-05-17 22:00"     # Set notification time (typically = due)
+remindctl edit 4A83 --notes "Replacement notes"    # Overwrite notes
+remindctl edit 4A83 --list "Today"                 # Move to a different list
+remindctl edit 4A83 --clear-due                    # Clear due date
+remindctl edit 4A83 --complete                     # Same as `remindctl complete 4A83`
+```
+
+`<id>` is an ID prefix from `remindctl all --json` (first 4+ chars of the UUID is usually unique) or an index from `remindctl show`.
+
 ### Complete / Delete
 
 ```bash
@@ -96,3 +110,16 @@ Accepted by `--due` and date filters:
 1. When user says "remind me", clarify: Apple Reminders (syncs to phone) vs agent cronjob alert
 2. Always confirm reminder content and due date before creating
 3. Use `--json` for programmatic parsing
+
+## AppleScript Fallback
+
+For the rare case `remindctl edit` can't cover (e.g. complex custom recurrence patterns), drop to osascript. **Gotcha:** the `id` returned by `remindctl --json` is a bare UUID, but AppleScript's `id` property is prefixed with `x-apple-reminder://`. Without the prefix, `first reminder whose id is "..."` silently fails — `delete` returns OK as a no-op, `set` errors with "Invalid index".
+
+```bash
+osascript <<'EOF'
+tell application "Reminders"
+  set r to first reminder whose id is "x-apple-reminder://EC0B8E91-782B-47A6-8D6A-778CDDA0D953"
+  set name of r to "New title"
+end tell
+EOF
+```
