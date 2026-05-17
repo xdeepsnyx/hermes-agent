@@ -100,6 +100,8 @@ Expected shape:
 
 Apple's public `EKReminder` docs list only reminder-specific properties. Alarm support comes from inherited `EKCalendarItem` behavior exposed by remindctl's `--alarm` flag.
 
+`<id>` accepts an ID prefix from `remindctl all --json` (first 4+ chars of the UUID is usually unique) or an index from `remindctl show`.
+
 ### Complete / Delete
 
 ```bash
@@ -128,3 +130,16 @@ Accepted by `--due` and date filters:
 1. When user says "remind me", clarify: Apple Reminders (syncs to phone) vs agent cronjob alert
 2. Always confirm reminder content and due date before creating
 3. Use `--json` for programmatic parsing
+
+## AppleScript Fallback
+
+For the rare case `remindctl edit` can't cover (e.g. complex custom recurrence patterns), drop to osascript. **Gotcha:** the `id` returned by `remindctl --json` is a bare UUID, but AppleScript's `id` property is prefixed with `x-apple-reminder://`. Without the prefix, `first reminder whose id is "..."` silently fails — `delete` returns OK as a no-op, `set` errors with "Invalid index".
+
+```bash
+osascript <<'EOF'
+tell application "Reminders"
+  set r to first reminder whose id is "x-apple-reminder://EC0B8E91-782B-47A6-8D6A-778CDDA0D953"
+  set name of r to "New title"
+end tell
+EOF
+```
