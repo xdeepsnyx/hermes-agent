@@ -241,17 +241,16 @@ class TestReducerChain:
         assert "\x1b" not in out
         assert "(... 99 more identical lines ...)" in out
 
-    def test_writes_observability_log_on_reduction(self, _isolate_env):
+    def test_observability_log_is_noop_post_observation_window(self, _isolate_env):
+        """Per 2026-05-30 retirement of the 2-week verbose observation log,
+        `_log_reduction` is now a no-op shim — reductions still happen, but
+        no per-event line is written. The log file should not be created."""
         reducer = _load_reducer()
         raw = "\x1b[32mhi\x1b[0m\n" + ("x\n" * 200)
         out = reducer.reduce_tool_output("terminal", raw)
-        assert out is not None
+        assert out is not None  # reduction still happens
         log_path = _isolate_env / "logs" / "tool_reducer.log"
-        assert log_path.exists()
-        content = log_path.read_text()
-        assert "terminal" in content
-        assert "->" in content
-        assert "saved=" in content
+        assert not log_path.exists()  # but no observability line written
 
 
 class TestReducerJsonWrapping:
