@@ -73,21 +73,24 @@ def _ist_now() -> str:
 
 
 def _log_reduction(tool_name: str, orig_bytes: int, reduced_bytes: int) -> None:
-    """Best-effort observability log. Never raises.
+    """No-op shim — verbose observation logging retired 2026-05-30.
 
-    TODO(2026-05-30): switch to errors-only after observation window.
+    The 2-week observation window (2026-05-16 → 2026-05-30) produced 2 log
+    entries total, both from the 5/16 enablement day. That matches the
+    AGENT_HANDOFF diagnostic-table row "tool_reducer.log has no recent
+    entries despite tool-call-heavy chat": most tool result wrappers fall
+    outside the rules' JSON-handler shapes or hit < PASSTHROUGH_THRESHOLD,
+    so the reducer noops silently and never reaches this log call. The
+    success path was the only thing being logged; there's no real error
+    path here (the rule chain returns None on rule-raise; this function
+    itself silently swallowed filesystem errors). So "errors-only" in
+    practice = make this a no-op.
+
+    Kept as a shim (vs. removing call-sites) so the next observation pass
+    is a one-line restore from git history: commit `100d7d10e` for the
+    original body, commit `a250d105a` for the 1.0.1 JSON-wrapper fix.
     """
-    try:
-        LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
-        line = (
-            f"[{_ist_now()}] {tool_name} "
-            f"{orig_bytes}->{reduced_bytes} "
-            f"saved={orig_bytes - reduced_bytes}\n"
-        )
-        with LOG_PATH.open("a", encoding="utf-8") as f:
-            f.write(line)
-    except Exception:
-        pass
+    return
 
 
 def _is_error_response(raw: str) -> bool:
