@@ -33,6 +33,11 @@ import json
 import logging
 from typing import Any, Dict, List, Optional, Union
 
+from tools.memory_search_caps import (
+    cap_memory_search_result,
+    get_memory_search_result_char_limit,
+)
+
 # Sources that are excluded from session browsing/searching by default.
 # Third-party integrations tag their sessions with HERMES_SESSION_SOURCE=tool;
 # delegate subagent runs are tagged "subagent"; kanban dispatcher workers are
@@ -845,6 +850,11 @@ def _discover(
     return json.dumps(_final_payload, ensure_ascii=False)
 
 
+def _cap_result(payload: str) -> str:
+    """Cap a session_search result payload at the configured char limit."""
+    return cap_memory_search_result(payload)
+
+
 def session_search(
     query: str = "",
     role_filter: str = None,
@@ -859,6 +869,28 @@ def session_search(
     sort: str = None,
     # Cross-profile (any shape)
     profile: str = None,
+) -> str:
+    """Capped public entrypoint — delegates to ``_session_search_impl`` and
+    enforces the memory/recall char cap at the tool boundary (all return
+    paths funnel through here)."""
+    return _cap_result(_session_search_impl(
+        query=query, role_filter=role_filter, limit=limit, db=db,
+        current_session_id=current_session_id, session_id=session_id,
+        around_message_id=around_message_id, window=window, sort=sort))
+
+
+def _session_search_impl(
+    query: str = "",
+    role_filter: str = None,
+    limit: int = 3,
+    db=None,
+    current_session_id: str = None,
+    # Scroll shape
+    session_id: str = None,
+    around_message_id: int = None,
+    window: int = 5,
+    # Discovery shape
+    sort: str = None,
 ) -> str:
     """Single-shape tool. Mode inferred from which args are set.
 
@@ -1158,4 +1190,5 @@ registry.register(
     ),
     check_fn=check_session_search_requirements,
     emoji="🔍",
+    max_result_size_chars=get_memory_search_result_char_limit(),
 )

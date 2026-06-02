@@ -823,3 +823,30 @@ class TestLegacyContinuationPlusDelegation:
 
         # Delegation child must NOT appear
         assert "s_delegate" not in sids
+
+
+# --- Memory recall cap (re-homed from 11880cb97) ---------------------------
+from tools.memory_search_caps import (
+    cap_memory_search_result,
+    format_memory_search_truncation_notice,
+)
+import tools.session_search_tool as _sst
+
+
+class TestMemorySearchResultCap:
+    def test_cap_appends_visible_notice_and_respects_limit(self):
+        result = cap_memory_search_result("x" * 12000, limit=10000)
+        assert len(result) <= 10000
+        assert result.endswith(format_memory_search_truncation_notice(10000))
+        assert "Result truncated at 10K chars" in result
+
+    def test_session_search_caps_large_result_at_tool_boundary(self, monkeypatch):
+        monkeypatch.setattr(_sst, "_session_search_impl", lambda **_kw: "s" * 12000)
+        monkeypatch.setattr(
+            "tools.memory_search_caps.get_memory_search_result_char_limit",
+            lambda: 10000,
+        )
+        result = _sst.session_search(query="message", db=object(), limit=1)
+        assert len(result) <= 10000
+        assert result.endswith(format_memory_search_truncation_notice(10000))
+        assert "Result truncated at 10K chars" in result

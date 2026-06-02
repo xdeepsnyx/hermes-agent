@@ -1638,6 +1638,10 @@ DEFAULT_CONFIG = {
     # Persistent memory -- bounded curated memory injected into system prompt
     "memory": {
         "memory_enabled": True,
+        # Fork (PR #21692, still open upstream): hard cap on memory/recall tool
+        # output chars, enforced in MemoryManager.handle_tool_call via
+        # tools/memory_search_caps.py.
+        "search_result_char_limit": 10000,
         "user_profile_enabled": True,
         # Approval gate for memory writes (add/replace/remove), applied to BOTH
         # foreground agent turns and the background self-improvement review fork

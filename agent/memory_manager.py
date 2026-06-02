@@ -38,6 +38,7 @@ from agent.skill_commands import extract_user_instruction_from_skill_message
 from tools.registry import tool_error
 
 logger = logging.getLogger(__name__)
+_MEMORY_SEARCH_TOOL_RE = re.compile(r"(search|query|recall|profile)$")
 
 # How long shutdown_all() waits for in-flight background sync/prefetch work
 # to drain before abandoning it. A wedged provider must never block process
@@ -838,7 +839,15 @@ class MemoryManager:
         if provider is None:
             return tool_error(f"No memory provider handles tool '{tool_name}'")
         try:
-            return provider.handle_tool_call(tool_name, args, **kwargs)
+            result = provider.handle_tool_call(tool_name, args, **kwargs)
+            if _MEMORY_SEARCH_TOOL_RE.search(tool_name):
+                try:
+                    from tools.memory_search_caps import cap_memory_search_result
+
+                    return cap_memory_search_result(result)
+                except Exception:
+                    logger.debug("Memory search result cap failed for %s", tool_name, exc_info=True)
+            return result
         except Exception as e:
             logger.error(
                 "Memory provider '%s' handle_tool_call(%s) failed: %s",
