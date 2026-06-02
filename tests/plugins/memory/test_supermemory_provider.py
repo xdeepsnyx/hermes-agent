@@ -456,3 +456,175 @@ def test_save_config_sets_owner_only_permissions(tmp_path):
     assert config_file.exists()
     mode = stat.S_IMODE(config_file.stat().st_mode)
     assert mode == 0o600, f"Expected 0o600 (owner-only), got {oct(mode)}"
+
+
+# --- Dedup tests (auto-dedup in _SupermemoryClient.add_memory) ---
+
+
+class _FakeAddResult:
+    def __init__(self, doc_id):
+        self.id = doc_id
+
+
+class _FakeSearchItem:
+    def __init__(self, *, id, memory, similarity):
+        self.id = id
+        self.memory = memory
+        self.similarity = similarity
+        self.updated_at = None
+        self.metadata = None
+
+
+class _FakeSearchResponse:
+    def __init__(self, items):
+        self.results = items
+
+
+class _FakeSDKDocuments:
+    def __init__(self, parent):
+        self._parent = parent
+
+    def add(self, **kwargs):
+        self._parent.add_calls.append(kwargs)
+        return _FakeAddResult(self._parent._next_add_id)
+
+
+class _FakeSDKSearch:
+    def __init__(self, parent):
+        self._parent = parent
+
+    def memories(self, **kwargs):
+        self._parent.search_calls.append(kwargs)
+        if self._parent._search_raises:
+            raise RuntimeError("simulated search failure")
+        return _FakeSearchResponse(self._parent._search_items)
+
+
+class FakeSupermemorySDK:
+    """Fakes the upstream supermemory.Supermemory client for _SupermemoryClient tests."""
+
+    def __init__(self, *, api_key=None, timeout=None, max_retries=None):
+        self.api_key = api_key
+        self.timeout = timeout
+        self.add_calls = []
+        self.search_calls = []
+        self._search_items = []
+        self._search_raises = False
+        self._next_add_id = "new_id_xyz"
+        self.documents = _FakeSDKDocuments(self)
+        self.search = _FakeSDKSearch(self)
+
+    def configure_search(self, items, *, raises=False):
+        self._search_items = items
+        self._search_raises = raises
+
+
+@pytest.fixture
+def fake_sdk(monkeypatch):
+    sdk = FakeSupermemorySDK()
+    monkeypatch.setattr("plugins.memory.supermemory.Supermemory", lambda **kw: sdk, raising=False)
+
+    # _SupermemoryClient imports Supermemory inside __init__ via `from supermemory import Supermemory`;
+    # monkeypatch the supermemory module attribute too so the local import resolves to our fake.
+    import sys
+    fake_module = type(sys)("supermemory")
+    fake_module.Supermemory = lambda **kw: sdk
+    monkeypatch.setitem(sys.modules, "supermemory", fake_module)
+    return sdk
+
+
+def _make_client(fake_sdk, *, search_mode="hybrid"):
+    from plugins.memory.supermemory import _SupermemoryClient
+    return _SupermemoryClient(api_key="test", timeout=5.0, container_tag="nyx", search_mode=search_mode)
+
+
+def test_dedup_skips_write_when_similar_existing_memory(fake_sdk):
+    fake_sdk.configure_search([
+        _FakeSearchItem(id="existing_id_42", memory="Deep prefers thin cron triggers", similarity=0.9),
+    ])
+    client = _make_client(fake_sdk)
+
+    result = client.add_memory("Deep wants minimal cron prompts")
+
+    assert result["deduped"] is True
+    assert result["id"] == "existing_id_42"
+    assert len(fake_sdk.add_calls) == 0  # no write happened
+    assert len(fake_sdk.search_calls) == 1
+
+
+def test_dedup_writes_when_similarity_below_threshold(fake_sdk):
+    fake_sdk.configure_search([
+        _FakeSearchItem(id="existing_id_42", memory="Deep prefers thin cron triggers", similarity=0.5),
+    ])
+    fake_sdk._next_add_id = "new_id_1"
+    client = _make_client(fake_sdk)
+
+    result = client.add_memory("Apple Notes capture inbox is Google/Notes")
+
+    assert result.get("deduped") is not True
+    assert result["id"] == "new_id_1"
+    assert len(fake_sdk.add_calls) == 1
+
+
+def test_dedup_writes_when_no_existing_memory(fake_sdk):
+    fake_sdk.configure_search([])  # empty search results
+    fake_sdk._next_add_id = "new_id_2"
+    client = _make_client(fake_sdk)
+
+    result = client.add_memory("brand new fact")
+
+    assert result["id"] == "new_id_2"
+    assert len(fake_sdk.add_calls) == 1
+
+
+def test_dedup_falls_through_on_search_error(fake_sdk):
+    """Defensive: a transient search failure must not block legitimate writes."""
+    fake_sdk.configure_search([], raises=True)
+    fake_sdk._next_add_id = "new_id_3"
+    client = _make_client(fake_sdk)
+
+    result = client.add_memory("must-write content")
+
+    assert result["id"] == "new_id_3"
+    assert len(fake_sdk.add_calls) == 1
+
+
+def test_dedup_can_be_disabled_per_call(fake_sdk):
+    """Caller can opt out of dedup with dedup=False."""
+    fake_sdk.configure_search([
+        _FakeSearchItem(id="existing_id_42", memory="exact match", similarity=0.99),
+    ])
+    fake_sdk._next_add_id = "new_id_4"
+    client = _make_client(fake_sdk)
+
+    result = client.add_memory("exact match", dedup=False)
+
+    assert result["id"] == "new_id_4"
+    assert len(fake_sdk.add_calls) == 1
+    assert len(fake_sdk.search_calls) == 0  # no dedup search performed
+
+
+def test_dedup_threshold_boundary(fake_sdk):
+    """Similarity exactly at the threshold should count as a duplicate (>= comparison)."""
+    from plugins.memory.supermemory import _DEDUP_SIMILARITY_THRESHOLD
+    fake_sdk.configure_search([
+        _FakeSearchItem(id="boundary_id", memory="boundary content", similarity=_DEDUP_SIMILARITY_THRESHOLD),
+    ])
+    client = _make_client(fake_sdk)
+
+    result = client.add_memory("similar content")
+
+    assert result["deduped"] is True
+    assert result["id"] == "boundary_id"
+    assert len(fake_sdk.add_calls) == 0
+
+
+def test_dedup_empty_content_returns_early(fake_sdk):
+    """Empty or whitespace-only content should not trigger search or write."""
+    client = _make_client(fake_sdk)
+
+    result = client.add_memory("   ")
+
+    assert result == {"id": ""}
+    assert len(fake_sdk.add_calls) == 0
+    assert len(fake_sdk.search_calls) == 0

@@ -31,6 +31,7 @@ _DEFAULT_SEARCH_MODE = "hybrid"
 _VALID_SEARCH_MODES = ("hybrid", "memories", "documents")
 _DEFAULT_API_TIMEOUT = 5.0
 _MIN_CAPTURE_LENGTH = 10
+_DEDUP_SIMILARITY_THRESHOLD = 0.85  # Semantic-similarity cutoff for skipping duplicate writes.
 _MAX_ENTITY_CONTEXT_LENGTH = 1500
 _DEFAULT_BASE_URL = "https://api.supermemory.ai"
 _API_KEY_URL = "http://app.supermemory.ai/integrations?connect=hermes"
@@ -319,10 +320,38 @@ class _SupermemoryClient:
 
     def add_memory(self, content: str, metadata: Optional[dict] = None, *,
                    entity_context: str = "", container_tag: Optional[str] = None,
-                   custom_id: Optional[str] = None) -> dict:
+                   custom_id: Optional[str] = None, dedup: bool = True) -> dict:
         tag = container_tag or self._container_tag
+        content_str = content.strip()
+        if not content_str:
+            return {"id": ""}
+
+        # Dedup check: skip the write if Supermemory already has a semantically
+        # equivalent memory (similarity >= _DEDUP_SIMILARITY_THRESHOLD). The
+        # check uses the existing search endpoint with limit=1; on any failure
+        # we fall through to the write to avoid blocking legitimate writes on
+        # a transient search-side error. Decisions are logged with the
+        # SUPERMEMORY_DEDUP: prefix for auditability.
+        if dedup:
+            try:
+                existing = self.search_memories(content_str, limit=1, container_tag=tag)
+                if existing:
+                    similarity = existing[0].get("similarity")
+                    if isinstance(similarity, (int, float)) and similarity >= _DEDUP_SIMILARITY_THRESHOLD:
+                        existing_id = existing[0].get("id", "") or ""
+                        logger.info(
+                            "SUPERMEMORY_DEDUP: skip (similarity=%.3f existing_id=%s tag=%s) %r",
+                            float(similarity), existing_id[:14], tag, content_str[:80]
+                        )
+                        return {"id": existing_id, "deduped": True}
+            except Exception as exc:  # noqa: BLE001
+                logger.debug(
+                    "SUPERMEMORY_DEDUP: check failed (%s); proceeding with write",
+                    exc,
+                )
+
         kwargs: dict[str, Any] = {
-            "content": content.strip(),
+            "content": content_str,
             "container_tags": [tag],
         }
         if metadata:
@@ -332,7 +361,12 @@ class _SupermemoryClient:
         if custom_id:
             kwargs["custom_id"] = custom_id
         result = self._client.documents.add(**kwargs)
-        return {"id": getattr(result, "id", "")}
+        new_id = getattr(result, "id", "") or ""
+        logger.info(
+            "SUPERMEMORY_DEDUP: store (id=%s tag=%s) %r",
+            new_id[:14], tag, content_str[:80]
+        )
+        return {"id": new_id}
 
     def search_memories(self, query: str, *, limit: int = 5,
                         container_tag: Optional[str] = None,
