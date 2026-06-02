@@ -519,6 +519,30 @@ def _restore_or_build_system_prompt(agent, system_message, conversation_history)
     if stored_prompt and _stored_prompt_matches_runtime(agent, stored_prompt):
         # Continuing session — reuse the exact system prompt from the
         # previous turn so the Anthropic cache prefix matches.
+        #
+        # EXCEPTION (Deep/Nyx fork): if a Daily Checkin opened *after* this
+        # session's prompt was stored, the stored prompt predates the
+        # state-aware checkin addendum. Rebuild only in the missing-but-
+        # required direction (the reverse is handled by the addendum's
+        # POST-CLOSE clause, preserving the prefix cache there).
+        try:
+            _checkin_add = agent._build_daily_checkin_addendum()
+        except Exception:
+            _checkin_add = None
+        if _checkin_add and _checkin_add not in stored_prompt:
+            logger.info(
+                "Daily Checkin opened mid-session — rebuilding stored "
+                "system prompt to inject the checkin mandate (session %s)",
+                agent.session_id,
+            )
+            agent._cached_system_prompt = agent._build_system_prompt(system_message)
+            if agent._session_db:
+                try:
+                    agent._session_db.update_system_prompt(
+                        agent.session_id, agent._cached_system_prompt)
+                except Exception as e:
+                    logger.debug("update_system_prompt failed: %s", e)
+            return
         agent._cached_system_prompt = stored_prompt
         # Reconstruct the cross-session-stable prefix for the early cache
         # breakpoint. The static prefix is not persisted (only the full

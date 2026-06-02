@@ -328,6 +328,18 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
     if skills_prompt:
         stable_parts.append(skills_prompt)
 
+    # --- Custom patch (Deep/Nyx fork): Daily Checkin state-aware mandate ---
+    # Injected at the tail of the STABLE tier — after skills_prompt, before
+    # context_files (which lives in context_parts) — matching the fork's
+    # original "between skills_prompt and context_files_prompt" position.
+    try:
+        _checkin_addendum = agent._build_daily_checkin_addendum()
+        if _checkin_addendum:
+            stable_parts.append(_checkin_addendum)
+    except Exception:
+        # Never break prompt assembly on a state-file read failure.
+        pass
+
     # Alibaba Coding Plan API always returns "glm-4.7" as model name regardless
     # of the requested model. Inject explicit model identity into the system prompt
     # so the agent can correctly report which model it is (workaround for API bug).
