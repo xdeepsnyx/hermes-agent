@@ -1162,6 +1162,62 @@ def _build_job_prompt(job: dict, prerun_script: Optional[tuple] = None) -> str:
     return _scan_assembled_cron_prompt("\n".join(parts), job, has_skills=True)
 
 
+def _seed_cron_session_title(
+    session_db,
+    session_id: str,
+    job_name: str,
+    started_at,
+) -> Optional[str]:
+    """Pre-create the session row and seed a deterministic title.
+
+    Without this, every cron-spawned session renders in the dashboard as the
+    literal first message — which for skill-invoking jobs is the
+    ``[IMPORTANT: The user has invoked the "<skill>" skill, ...]`` preamble
+    that ``_build_job_prompt`` prepends. Two reasons it ends up there:
+      1. ``cron/scheduler.py`` does not call ``maybe_auto_title`` (the
+         auto-title path that ``cli.py`` / ``gateway/run.py`` /
+         ``tui_gateway/server.py`` / ``acp_adapter/server.py`` use), so cron
+         sessions never get an LLM-summarized title.
+      2. ``web/src/pages/SessionsPage.tsx`` falls back to rendering the
+         first 60 characters of the first user message when ``title`` is
+         empty, so N runs of the same skill all look identical in the list.
+
+    Title format: ``"<job_name> · YYYY-MM-DD HH:MM:SS"``. Seconds are
+    included so two runs in the same minute don't collide on the unique
+    constraint enforced by ``SessionDB.set_session_title``. Truncated if it
+    would exceed ``SessionDB.MAX_TITLE_LENGTH``.
+
+    Returns the title that was set, or ``None`` if seeding was skipped or
+    failed (logs at debug — this is a UI nicety, never block job execution).
+    """
+    if session_db is None:
+        return None
+    try:
+        from hermes_state import SessionDB
+
+        timestamp = started_at.strftime("%Y-%m-%d %H:%M:%S")
+        suffix = f" · {timestamp}"
+        max_len = SessionDB.MAX_TITLE_LENGTH
+        if len(job_name) + len(suffix) > max_len:
+            head_room = max(1, max_len - len(suffix) - 1)
+            title = f"{job_name[:head_room]}…{suffix}"
+        else:
+            title = f"{job_name}{suffix}"
+
+        # ``set_session_title`` is an UPDATE that no-ops when the row is
+        # missing. Pre-create with INSERT OR IGNORE so the title sticks on
+        # the first try. AIAgent's lazy ``_ensure_db_session`` will hit the
+        # same INSERT OR IGNORE later and harmlessly no-op.
+        session_db.create_session(session_id=session_id, source="cron")
+        if session_db.set_session_title(session_id, title):
+            return title
+    except Exception:
+        logger.debug(
+            "Failed to seed cron session title for session %r", session_id, exc_info=True
+        )
+    return None
+
+
 def _scan_assembled_cron_prompt(assembled: str, job: dict, *, has_skills: bool = False) -> str:
     """Scan the fully-assembled cron prompt for injection patterns. Raises
     ``CronPromptInjectionBlocked`` when a match fires so ``run_job`` can
@@ -1389,7 +1445,18 @@ def _run_job_impl(job: dict) -> tuple[bool, str, str, Optional[str]]:
         logger.info("Job '%s': script produced no output, skipping AI call.", job_name)
         return True, "", SILENT_MARKER, None
     origin = _resolve_origin(job)
-    _cron_session_id = f"cron_{job_id}_{_hermes_now().strftime('%Y%m%d_%H%M%S')}"
+    _started_at = _hermes_now()
+    _cron_session_id = f"cron_{job_id}_{_started_at.strftime('%Y%m%d_%H%M%S')}"
+
+    # Seed the session title up front so the dashboard doesn't fall back to
+    # rendering the ``[IMPORTANT: ... skill invocation ...]`` preamble of
+    # the first user message. Best-effort — never block job execution on a
+    # UI nicety. See ``_seed_cron_session_title`` for the full rationale.
+    _seeded_title = _seed_cron_session_title(
+        _session_db, _cron_session_id, job_name, _started_at
+    )
+    if _seeded_title:
+        logger.debug("Job '%s': seeded session title %r", job_id, _seeded_title)
 
     logger.info("Running job '%s' (ID: %s)", job_name, job_id)
     logger.info("Prompt: %s", prompt[:100])
