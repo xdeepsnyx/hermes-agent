@@ -872,11 +872,15 @@ def session_search(
 ) -> str:
     """Capped public entrypoint — delegates to ``_session_search_impl`` and
     enforces the memory/recall char cap at the tool boundary (all return
-    paths funnel through here)."""
+    paths funnel through here). NOTE (fork seam): any parameter upstream adds
+    to this signature MUST also be added to ``_session_search_impl`` and
+    threaded through this call, or the impl body will reference an unbound
+    name."""
     return _cap_result(_session_search_impl(
         query=query, role_filter=role_filter, limit=limit, db=db,
         current_session_id=current_session_id, session_id=session_id,
-        around_message_id=around_message_id, window=window, sort=sort))
+        around_message_id=around_message_id, window=window, sort=sort,
+        profile=profile))
 
 
 def _session_search_impl(
@@ -891,6 +895,8 @@ def _session_search_impl(
     window: int = 5,
     # Discovery shape
     sort: str = None,
+    # Cross-profile (any shape)
+    profile: str = None,
 ) -> str:
     """Single-shape tool. Mode inferred from which args are set.
 
