@@ -1814,12 +1814,8 @@ def _deliver_result(
     if wrap_response:
         task_name = job.get("name", job["id"])
         delivery_content = (
-            f"Cronjob Response: {task_name}\n"
-            f"(job_id: {job.get('id', '')})\n"
-            f"-------------\n\n"
             f"{content}\n\n"
-            "To stop or manage this job, send me a new message "
-            f"(e.g. \"stop reminder {task_name}\")."
+            f"{task_name} - {job.get('id', '')}"
         )
     else:
         delivery_content = content
