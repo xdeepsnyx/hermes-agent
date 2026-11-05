@@ -551,6 +551,7 @@ def calendar_list(args):
                 "description": e.get("description", ""),
                 "status": e.get("status", ""),
                 "htmlLink": e.get("htmlLink", ""),
+                "attendees": [x.get("email", "") for x in e.get("attendees", []) if not x.get("self")],
             })
         print(json.dumps(events, indent=2, ensure_ascii=False))
         return
@@ -572,6 +573,7 @@ def calendar_list(args):
             "description": e.get("description", ""),
             "status": e.get("status", ""),
             "htmlLink": e.get("htmlLink", ""),
+            "attendees": [x.get("email", "") for x in e.get("attendees", []) if not x.get("self")],
         })
     print(json.dumps(events, indent=2, ensure_ascii=False))
 
