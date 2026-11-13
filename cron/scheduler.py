@@ -1519,6 +1519,17 @@ def _resolve_job_workdir(job: dict, job_id: str) -> Optional[str]:
     return workdir
 
 
+def _script_own_alert(output: str) -> Optional[str]:
+    """A failing script that already wrote its alert as a sentence (stdout starting with ⚠) is
+    delivered as just that sentence; the job still records as failed. Anything else keeps the
+    full watchdog wrapper. (local patch 2026-11-13, Deep: "make it make sense. Or don't send it")"""
+    marker = "\nstdout:\n"
+    if marker not in output:
+        return None
+    stdout = output.split(marker, 1)[1].strip()
+    return stdout if stdout.startswith("⚠") else None
+
+
 def _run_no_agent_job(
     job: dict, job_id: str, job_name: str, cancel_event,
 ) -> tuple[bool, str, str, Optional[str]]:
@@ -1555,7 +1566,7 @@ def _run_no_agent_job(
 
     if not ok:
         # Deliver the error: a silently broken watchdog is the worst-case outcome.
-        alert = (
+        alert = _script_own_alert(output) or (
             f"⚠ Cron watchdog '{job_name}' script failed\n\n"
             f"{output}\n\n"
             f"Time: {now_iso}"
